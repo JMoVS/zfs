@@ -66,6 +66,9 @@
 #include <sys/ioccom.h>
 
 
+#ifndef __APPLE_SECURITY_XATTR__
+#define __APPLE_SECURITY_XATTR__
+#endif
 
 #ifdef _KERNEL
 #include <sys/sysctl.h>
@@ -1094,8 +1097,12 @@ zfs_vnop_setattr(struct vnop_setattr_args *ap)
 	 * However, ZFS assumes 'mode' is also set. We need to look up 'mode' in
 	 * this case.
 	 */
+#ifndef __APPLE_SECURITY_XATTR__
 	if ((VATTR_IS_ACTIVE(vap, va_flags) || VATTR_IS_ACTIVE(vap, va_acl)) &&
 	    !VATTR_IS_ACTIVE(vap, va_mode)) {
+#else
+	if (VATTR_IS_ACTIVE(vap, va_flags)) {
+#endif /* !__APPLE_SECURITY_XATTR__ */
 		znode_t *zp = VTOZ(ap->a_vp);
 		uint64_t mode;
 
@@ -1123,11 +1130,12 @@ zfs_vnop_setattr(struct vnop_setattr_args *ap)
 		dprintf("OS X flags %08x changed to ZFS %04llx\n",
 		    vap->va_flags, zp->z_pflags);
 		vap->va_flags = zp->z_pflags;
-
 	}
+#ifndef __APPLE_SECURITY_XATTR__
 	if (VATTR_IS_ACTIVE(vap, va_acl)) {
 		mask |= AT_ACL;
 	}
+#endif /* !__APPLE_SECURITY_XATTR__ */
 
 	vap->va_mask = mask;
 	error = zfs_setattr(ap->a_vp, ap->a_vap, /* flag */0, cr, ct);
@@ -1145,8 +1153,10 @@ zfs_vnop_setattr(struct vnop_setattr_args *ap)
 		}
 		if (VATTR_IS_ACTIVE(vap, va_mode))
 			VATTR_SET_SUPPORTED(vap, va_mode);
+#ifndef __APPLE_SECURITY_XATTR__
 		if (VATTR_IS_ACTIVE(vap, va_acl))
 			VATTR_SET_SUPPORTED(vap, va_acl);
+#endif /* !__APPLE_SECURITY_XATTR__ */
 		if (VATTR_IS_ACTIVE(vap, va_uid))
 			VATTR_SET_SUPPORTED(vap, va_uid);
 		if (VATTR_IS_ACTIVE(vap, va_gid))
