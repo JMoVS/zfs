@@ -21,6 +21,7 @@
 /*
  * Copyright (c) 2005, 2010, Oracle and/or its affiliates. All rights reserved.
  * Copyright (c) 2012, 2015 by Delphix. All rights reserved.
+ * Copyright 2016 RackTop Systems.
  */
 
 #ifndef	_SYS_ZFS_IOCTL_H
@@ -98,10 +99,12 @@ typedef enum drr_headertype {
 #define	DMU_BACKUP_FEATURE_SA_SPILL		(1 << 2)
 /* flags #3 - #15 are reserved for incompatible closed-source implementations */
 #define	DMU_BACKUP_FEATURE_EMBED_DATA		(1 << 16)
-#define	DMU_BACKUP_FEATURE_EMBED_DATA_LZ4	(1 << 17)
+#define	DMU_BACKUP_FEATURE_LZ4			(1 << 17)
 /* flag #18 is reserved for a Delphix feature */
 #define	DMU_BACKUP_FEATURE_LARGE_BLOCKS		(1 << 19)
 #define	DMU_BACKUP_FEATURE_RESUMING		(1 << 20)
+/* flag #21 is reserved for a Delphix feature */
+#define	DMU_BACKUP_FEATURE_COMPRESSED		(1 << 22)
 
     /* Unsure what Oracle called this bit */
 #define	DMU_BACKUP_FEATURE_SPILLBLOCKS	(0x20)
@@ -125,9 +128,10 @@ NOTE 3:  Fix to 7097870 (spill block can be dropped in some situations during
  */
 #define	DMU_BACKUP_FEATURE_MASK	(DMU_BACKUP_FEATURE_DEDUP | \
     DMU_BACKUP_FEATURE_DEDUPPROPS | DMU_BACKUP_FEATURE_SA_SPILL | \
-    DMU_BACKUP_FEATURE_EMBED_DATA | DMU_BACKUP_FEATURE_EMBED_DATA_LZ4 | \
+    DMU_BACKUP_FEATURE_EMBED_DATA | DMU_BACKUP_FEATURE_LZ4 | \
     DMU_BACKUP_FEATURE_RESUMING | \
-    DMU_BACKUP_FEATURE_LARGE_BLOCKS)
+    DMU_BACKUP_FEATURE_LARGE_BLOCKS | \
+    DMU_BACKUP_FEATURE_COMPRESSED)
 
 /* Are all features in the given flag word currently supported? */
 #define	DMU_STREAM_SUPPORTED(x)	(!((x) & ~DMU_BACKUP_FEATURE_MASK))
@@ -155,6 +159,10 @@ typedef enum dmu_send_resume_token_version {
 
 #define	DMU_BACKUP_MAGIC 0x2F5bacbacULL
 
+/*
+ * Send stream flags.  Bits 24-31 are reserved for vendor-specific
+ * implementations and should not be used.
+ */
 #define	DRR_FLAG_CLONE		(1<<0)
 #define	DRR_FLAG_CI_DATA	(1<<1)
 /*
@@ -175,6 +183,12 @@ typedef enum dmu_send_resume_token_version {
 #define	DRR_CHECKSUM_DEDUP	(1<<0)
 
 #define	DRR_IS_DEDUP_CAPABLE(flags)	((flags) & DRR_CHECKSUM_DEDUP)
+
+/* deal with compressed drr_write replay records */
+#define	DRR_WRITE_COMPRESSED(drrw)	((drrw)->drr_compressiontype != 0)
+#define	DRR_WRITE_PAYLOAD_SIZE(drrw) \
+	(DRR_WRITE_COMPRESSED(drrw) ? (drrw)->drr_compressed_size : \
+	(drrw)->drr_logical_size)
 
 /*
  * zfs ioctl command structure
@@ -223,12 +237,16 @@ typedef struct dmu_replay_record {
 			dmu_object_type_t drr_type;
 			uint32_t drr_pad;
 			uint64_t drr_offset;
-			uint64_t drr_length;
+			uint64_t drr_logical_size;
 			uint64_t drr_toguid;
 			uint8_t drr_checksumtype;
 			uint8_t drr_checksumflags;
-			uint8_t drr_pad2[6];
-			ddt_key_t drr_key; /* deduplication key */
+			uint8_t drr_compressiontype;
+			uint8_t drr_pad2[5];
+			/* deduplication key */
+			ddt_key_t drr_key;
+			/* only nonzero if drr_compressiontype is not 0 */
+			uint64_t drr_compressed_size;
 			/* content follows */
 		} drr_write;
 		struct drr_free {
@@ -368,6 +386,12 @@ typedef enum zfs_case {
 	ZFS_CASE_MIXED
 } zfs_case_t;
 
+/*
+ * Note: this struct must have the same layout in 32-bit and 64-bit, so
+ * that 32-bit processes (like /sbin/zfs) can pass it to the 64-bit
+ * kernel.  Therefore, we add padding to it so that no "hidden" padding
+ * is automatically added on 64-bit (but not on 32-bit).
+ */
 typedef struct zfs_cmd {
 	char		zc_name[MAXPATHLEN];	/* name of pool or dataset */
 	uint64_t	zc_nvlist_src;		/* really (char *) */
@@ -402,14 +426,16 @@ typedef struct zfs_cmd {
 	uint32_t	zc_flags;
 	uint64_t	zc_action_handle;
 	int		zc_cleanup_fd;
+	uint8_t		zc_simple;
+	uint8_t		zc_pad3[3];
 	boolean_t       zc_resumable;
+	uint32_t	zc_pad4;
 	uint64_t	zc_sendobj;
 	uint64_t	zc_fromobj;
 	uint64_t	zc_createtxg;
 	zfs_stat_t	zc_stat;
     int             zc_ioc_error; /* ioctl error value */
     uint64_t        zc_dev;      /* OSX doesn't have ddi_driver_major*/
-	uint8_t         zc_simple;
 } zfs_cmd_t;
 
 

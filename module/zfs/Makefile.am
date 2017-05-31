@@ -14,7 +14,6 @@ SPL_KMODDIR=	@SPL@/module/spl/spl.kext
 CFLAGS_KMOD = \
 	$(AM_CFLAGS) \
 	-Wall \
-	-nostdinc \
 	-mkernel \
 	-D_KERNEL \
 	-DKERNEL \
@@ -25,6 +24,7 @@ CFLAGS_KMOD = \
 	-DNAMEDSTREAMS=1 \
 	-DHAVE_SPL=1 \
 	-I$(top_srcdir)/include \
+	-I$(top_srcdir)/module/icp/include \
 	-I@SPL_OBJ@ -I@SPL_OBJ@/include \
 	-I@KERNELSRC@
 
@@ -42,6 +42,7 @@ noinst_PROGRAMS = zfs
 zfs_kext_SOURCE =
 
 zfs_SOURCES = \
+	abd.c \
 	arc.c \
 	blkptr.c \
 	bplist.c \
@@ -77,6 +78,9 @@ zfs_SOURCES = \
 	fm.c \
 	gfs.c \
 	gzip.c \
+	ldi_osx.c \
+	ldi_vnode.c \
+	ldi_iokit.cpp \
 	lzjb.c \
 	lz4.c \
 	metaslab.c \
@@ -86,7 +90,7 @@ zfs_SOURCES = \
 	rrwlock.c \
 	sa.c \
 	sha256.c \
-	skein_zfs.c	\
+	skein_zfs.c \
 	spa.c \
 	spa_boot.c \
 	spa_config.c \
@@ -115,6 +119,7 @@ zfs_SOURCES = \
 	zfeature.c \
 	zfeature_common.c \
 	zfs_acl.c \
+	zfs_boot.cpp \
 	zfs_byteswap.c \
 	zfs_ctldir.c \
 	zfs_debug.c \
@@ -143,6 +148,7 @@ zfs_SOURCES = \
 	zrlock.c \
 	zvol.c \
 	zvolIO.cpp \
+	ZFSPool.cpp \
 	../nvpair/fnvpair.c \
 	../nvpair/nvpair.c \
 	../nvpair/nvpair_alloc_fixed.c \
@@ -155,7 +161,40 @@ zfs_SOURCES = \
 	../zcommon/zfs_namecheck.c \
 	../zcommon/zfs_prop.c \
 	../zcommon/zpool_prop.c \
-	../zcommon/zprop_common.c
+	../zcommon/zprop_common.c \
+	../icp/illumos-crypto.c \
+	../icp/api/kcf_cipher.c \
+	../icp/api/kcf_digest.c \
+	../icp/api/kcf_mac.c \
+	../icp/api/kcf_miscapi.c \
+	../icp/api/kcf_ctxops.c \
+	../icp/core/kcf_callprov.c \
+	../icp/core/kcf_prov_tabs.c \
+	../icp/core/kcf_sched.c \
+	../icp/core/kcf_mech_tabs.c \
+	../icp/core/kcf_prov_lib.c \
+	../icp/spi/kcf_spi.c \
+	../icp/io/aes.c \
+	../icp/io/sha2_mod.c \
+	../icp/io/sha1_mod.c \
+	../icp/os/modhash.c \
+	../icp/os/bitmap_arch.c \
+	../icp/os/modconf.c \
+	../icp/algs/edonr/edonr.c \
+	../icp/algs/modes/cbc.c \
+	../icp/algs/modes/ccm.c \
+	../icp/algs/modes/ctr.c \
+	../icp/algs/modes/ecb.c \
+	../icp/algs/modes/gcm.c \
+	../icp/algs/modes/modes.c \
+	../icp/algs/sha1/sha1.c \
+	../icp/algs/sha2/sha2.c \
+	../icp/algs/skein/skein.c \
+	../icp/algs/skein/skein_block.c \
+	../icp/algs/skein/skein_iv.c \
+	../icp/algs/aes/aes_impl.c \
+	../icp/algs/aes/aes_modes.c \
+	../icp/asm-x86_64/aes/aeskey.c
 
 zfs_CPPFLAGS=$(CFLAGS_KMOD)
 zfs_CXXFLAGS=$(CFLAGS_KMOD)
@@ -173,6 +212,7 @@ zfs.kext$(EXEEXT): zfs $(PLIST_STRING) $(INFO_PLIST)
 	/usr/libexec/PlistBuddy -c "Set :CFBundleVersion $(ZFS_META_VERSION)" zfs.kext/Contents/Info.plist
 	/usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString $(ZFS_META_VERSION)" zfs.kext/Contents/Info.plist
 	/usr/libexec/PlistBuddy -c "Set :OSBundleLibraries:net.lundman.spl $(ZFS_META_VERSION)" zfs.kext/Contents/Info.plist
+	if [ "0$(ZFS_BOOT)" -eq 1 ]; then /usr/libexec/PlistBuddy -c "Add :OSBundleRequired string Root" zfs.kext/Contents/Info.plist && /usr/libexec/PlistBuddy -c "Set :IOKitPersonalities:net.lundman.zfs:IOResourceMatch IOBSD" zfs.kext/Contents/Info.plist; fi
 	cp -f $(PLIST_STRING) zfs.kext/Contents/Resources/English.lproj/
 	plutil -convert binary1 zfs.kext/Contents/Resources/English.lproj/InfoPlist.strings
 	cp -f $(top_srcdir)/VolumeIcon.icns zfs.kext/Contents/Resources/

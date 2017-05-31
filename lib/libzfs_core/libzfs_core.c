@@ -84,7 +84,7 @@
 #include <sys/stat.h>
 #include <sys/zfs_ioctl.h>
 
-static int g_fd;
+static int g_fd = -1;
 static pthread_mutex_t g_lock = PTHREAD_MUTEX_INITIALIZER;
 static int g_refcount;
 
@@ -109,9 +109,14 @@ libzfs_core_fini(void)
 {
 	(void) pthread_mutex_lock(&g_lock);
 	ASSERT3S(g_refcount, >, 0);
-	g_refcount--;
-	if (g_refcount == 0)
+
+	if (g_refcount > 0)
+		g_refcount--;
+
+	if (g_refcount == 0 && g_fd != -1) {
 		(void) close(g_fd);
+		g_fd = -1;
+	}
 	(void) pthread_mutex_unlock(&g_lock);
 }
 
@@ -126,6 +131,7 @@ lzc_ioctl(zfs_ioc_t ioc, const char *name,
 	size_t size;
 
 	ASSERT3S(g_refcount, >, 0);
+	VERIFY3S(g_fd, !=, -1);
 
 	(void) strlcpy(zc.zc_name, name, sizeof (zc.zc_name));
 
@@ -148,11 +154,8 @@ lzc_ioctl(zfs_ioc_t ioc, const char *name,
 		if (zc.zc_ioc_error != 0) {
 			errno = zc.zc_ioc_error;
 		} else if (ioctl_err != -1) {
-			dprintf("ioctl should return 0, or both return -1 and set errno, "
-			   "but instead : ioctl_err %d : errno %d\n", ioctl_err, errno);
 			errno = ioctl_err;
 		} else if (ioctl_err == -1 && errno == 0) {
-			dprintf("ioctl returned -1, so errno should have been nonzero.\n");
 			errno = -1;
 		}
 
@@ -182,11 +185,11 @@ out:
 }
 
 int
-lzc_create(const char *fsname, dmu_objset_type_t type, nvlist_t *props)
+lzc_create(const char *fsname, enum lzc_dataset_type type, nvlist_t *props)
 {
 	int error;
 	nvlist_t *args = fnvlist_alloc();
-	fnvlist_add_int32(args, "type", type);
+	fnvlist_add_int32(args, "type", (dmu_objset_type_t)type);
 	if (props != NULL)
 		fnvlist_add_nvlist(args, "props", props);
 	error = lzc_ioctl(ZFS_IOC_CREATE, fsname, args, NULL);
@@ -229,7 +232,7 @@ lzc_snapshot(nvlist_t *snaps, nvlist_t *props, nvlist_t **errlist)
 	nvpair_t *elem;
 	nvlist_t *args;
 	int error;
-	char pool[MAXNAMELEN];
+	char pool[ZFS_MAX_DATASET_NAME_LEN];
 
 	*errlist = NULL;
 
@@ -281,7 +284,7 @@ lzc_destroy_snaps(nvlist_t *snaps, boolean_t defer, nvlist_t **errlist)
 	nvpair_t *elem;
 	nvlist_t *args;
 	int error;
-	char pool[MAXNAMELEN];
+	char pool[ZFS_MAX_DATASET_NAME_LEN];
 
 	/* determine the pool name */
 	elem = nvlist_next_nvpair(snaps, NULL);
@@ -308,7 +311,7 @@ lzc_snaprange_space(const char *firstsnap, const char *lastsnap,
 	nvlist_t *args;
 	nvlist_t *result;
 	int err;
-	char fs[MAXNAMELEN];
+	char fs[ZFS_MAX_DATASET_NAME_LEN];
 	char *atp;
 
 	/* determine the fs name */
@@ -373,7 +376,7 @@ lzc_exists(const char *dataset)
 int
 lzc_hold(nvlist_t *holds, int cleanup_fd, nvlist_t **errlist)
 {
-	char pool[MAXNAMELEN];
+	char pool[ZFS_MAX_DATASET_NAME_LEN];
 	nvlist_t *args;
 	nvpair_t *elem;
 	int error;
@@ -420,7 +423,7 @@ lzc_hold(nvlist_t *holds, int cleanup_fd, nvlist_t **errlist)
 int
 lzc_release(nvlist_t *holds, nvlist_t **errlist)
 {
-	char pool[MAXNAMELEN];
+	char pool[ZFS_MAX_DATASET_NAME_LEN];
 	nvpair_t *elem;
 
 	/* determine the pool name */
@@ -498,6 +501,8 @@ lzc_send_resume(const char *snapname, const char *from, int fd,
 		fnvlist_add_boolean(args, "largeblockok");
 	if (flags & LZC_SEND_FLAG_EMBED_DATA)
 		fnvlist_add_boolean(args, "embedok");
+	if (flags & LZC_SEND_FLAG_COMPRESS)
+		fnvlist_add_boolean(args, "compressok");
 	if (resumeobj != 0 || resumeoff != 0) {
 		fnvlist_add_uint64(args, "resume_object", resumeobj);
 		fnvlist_add_uint64(args, "resume_offset", resumeoff);
@@ -523,7 +528,8 @@ lzc_send_resume(const char *snapname, const char *from, int fd,
  * an equivalent snapshot.
  */
 int
-lzc_send_space(const char *snapname, const char *from, uint64_t *spacep)
+lzc_send_space(const char *snapname, const char *from,
+    enum lzc_send_flags flags, uint64_t *spacep)
 {
 	nvlist_t *args;
 	nvlist_t *result;
@@ -532,6 +538,12 @@ lzc_send_space(const char *snapname, const char *from, uint64_t *spacep)
 	args = fnvlist_alloc();
 	if (from != NULL)
 		fnvlist_add_string(args, "from", from);
+	if (flags & LZC_SEND_FLAG_LARGE_BLOCK)
+		fnvlist_add_boolean(args, "largeblockok");
+	if (flags & LZC_SEND_FLAG_EMBED_DATA)
+		fnvlist_add_boolean(args, "embedok");
+	if (flags & LZC_SEND_FLAG_COMPRESS)
+		fnvlist_add_boolean(args, "compressok");
 	err = lzc_ioctl(ZFS_IOC_SEND_SPACE, snapname, args, &result);
 	nvlist_free(args);
 	if (err == 0)
@@ -575,6 +587,7 @@ recv_impl(const char *snapname, nvlist_t *props, const char *origin,
 	int error;
 
 	ASSERT3S(g_refcount, >, 0);
+	VERIFY3S(g_fd, !=, -1);
 
 	/* zc_name is name of containing filesystem */
 	(void) strlcpy(zc.zc_name, snapname, sizeof (zc.zc_name));
@@ -714,6 +727,8 @@ lzc_rollback(const char *fsname, char *snapnamebuf, int snapnamelen)
 		const char *snapname = fnvlist_lookup_string(result, "target");
 		(void) strlcpy(snapnamebuf, snapname, snapnamelen);
 	}
+	nvlist_free(result);
+
 	return (err);
 }
 
@@ -735,7 +750,7 @@ lzc_bookmark(nvlist_t *bookmarks, nvlist_t **errlist)
 {
 	nvpair_t *elem;
 	int error;
-	char pool[MAXNAMELEN];
+	char pool[ZFS_MAX_DATASET_NAME_LEN];
 
 	/* determine the pool name */
 	elem = nvlist_next_nvpair(bookmarks, NULL);
@@ -797,7 +812,7 @@ lzc_destroy_bookmarks(nvlist_t *bmarks, nvlist_t **errlist)
 {
 	nvpair_t *elem;
 	int error;
-	char pool[MAXNAMELEN];
+	char pool[ZFS_MAX_DATASET_NAME_LEN];
 
 	/* determine the pool name */
 	elem = nvlist_next_nvpair(bmarks, NULL);

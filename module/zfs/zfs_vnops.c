@@ -268,9 +268,9 @@ zfs_close(vnode_t *vp, int flag, int count, offset_t offset, cred_t *cr,
  * data (cmd == SEEK_DATA). "off" is an in/out parameter.
  */
 static int
-zfs_holey_common(struct inode *ip, int cmd, loff_t *off)
+zfs_holey_common(struct vnode *vp, int cmd, loff_t *off)
 {
-	znode_t	*zp = ITOZ(ip);
+	znode_t	*zp = VTOZ(vp);
 	uint64_t noff = (uint64_t)*off; /* new offset */
 	uint64_t file_sz;
 	int error;
@@ -286,7 +286,7 @@ zfs_holey_common(struct inode *ip, int cmd, loff_t *off)
 	else
 		hole = B_FALSE;
 
-	error = dmu_offset_next(ZTOZSB(zp)->z_os, zp->z_id, hole, &noff);
+	error = dmu_offset_next(zp->z_zfsvfs->z_os, zp->z_id, hole, &noff);
 
 	if (error == ESRCH)
 		return (SET_ERROR(ENXIO));
@@ -310,18 +310,18 @@ zfs_holey_common(struct inode *ip, int cmd, loff_t *off)
 }
 
 int
-zfs_holey(struct inode *ip, int cmd, loff_t *off)
+zfs_holey(struct vnode *vp, int cmd, loff_t *off)
 {
-	znode_t	*zp = ITOZ(ip);
-	zfs_sb_t *zsb = ITOZSB(ip);
+	znode_t	*zp = VTOZ(vp);
+	zfsvfs_t *zfsvfs = zp->z_zfsvfs;
 	int error;
 
-	ZFS_ENTER(zsb);
+	ZFS_ENTER(zfsvfs);
 	ZFS_VERIFY_ZP(zp);
 
-	error = zfs_holey_common(ip, cmd, off);
+	error = zfs_holey_common(vp, cmd, off);
 
-	ZFS_EXIT(zsb);
+	ZFS_EXIT(zfsvfs);
 	return (error);
 }
 
@@ -1324,7 +1324,7 @@ zfs_get_data(void *arg, lr_write_t *lr, char *buf, zio_t *zio,
 
 			error = dmu_sync(zio, lr->lr_common.lrc_txg,
 			    zfs_get_done, zgd);
-			ASSERT(error || lr->lr_length <= zp->z_blksz);
+			ASSERT(error || lr->lr_length <= size);
 
 			/*
 			 * On success, we need to wait for the write I/O
@@ -1440,7 +1440,9 @@ zfs_lookup(vnode_t *dvp, char *nm, vnode_t **vpp, struct componentname *cnp,
 				return (0);
 			}
 			return (error);
-		} else {
+		} else if (!zdp->z_zfsvfs->z_norm &&
+		    (zdp->z_zfsvfs->z_case == ZFS_CASE_SENSITIVE)) {
+
 			vnode_t *tvp = dnlc_lookup(dvp, nm);
 
 			if (tvp) {
@@ -1667,7 +1669,7 @@ zfs_create(vnode_t *dvp, char *name, vattr_t *vap, int excl, int mode,
 	}
 
 	if (vap->va_mask & AT_XVATTR) {
-		if ((error = secpolicy_xvattr(dvp, (vattr_t *)vap,
+		if ((error = secpolicy_xvattr(dvp, vap,
 		    crgetuid(cr), cr, vap->va_type)) != 0) {
 			ZFS_EXIT(zfsvfs);
 			return (error);
@@ -2436,6 +2438,7 @@ top:
 	dmu_tx_hold_zap(tx, zfsvfs->z_unlinkedobj, FALSE, NULL);
 	zfs_sa_upgrade_txholds(tx, zp);
 	zfs_sa_upgrade_txholds(tx, dzp);
+	dmu_tx_mark_netfree(tx);
 	error = dmu_tx_assign(tx, waited ? TXG_WAITED : TXG_NOWAIT);
 	if (error) {
 		rw_exit(&zp->z_parent_lock);
@@ -2797,7 +2800,7 @@ zfs_readdir(vnode_t *vp, uio_t *uio, cred_t *cr, int *eofp, int flags, int *a_nu
 			                      (u_int8_t *)eodp->d_name, &nfdlen,
 			                      MAXPATHLEN-1, UTF_DECOMPOSED) != 0) {
 				/* ASCII or normalization failed, just copy zap name. */
-                if ((namelen > 0) && eodp->d_name)
+                if ((namelen > 0))
                     (void) bcopy(zap.za_name, eodp->d_name, namelen + 1);
 			} else {
 				/* Normalization succeeded (already in buffer). */
@@ -2826,7 +2829,7 @@ zfs_readdir(vnode_t *vp, uio_t *uio, cred_t *cr, int *eofp, int flags, int *a_nu
 			                      (u_int8_t *)odp->d_name, &nfdlen,
 			                      MAXNAMLEN, UTF_DECOMPOSED) != 0) {
 				/* ASCII or normalization failed, just copy zap name. */
-                if ((namelen > 0) && odp->d_name)
+                if ((namelen > 0))
                     (void) bcopy(zap.za_name, odp->d_name, namelen + 1);
 			} else {
 				/* Normalization succeeded (already in buffer). */
@@ -5038,6 +5041,8 @@ zfs_putapage(vnode_t *vp, page_t **pp, u_offset_t *offp,
 		    &zp->z_pflags, 8);
 		zfs_tstamp_update_setup(zp, CONTENT_MODIFIED, mtime, ctime,
 		    B_TRUE);
+		err = sa_bulk_update(zp->z_sa_hdl, bulk, count, tx);
+		ASSERT0(err);
 		zfs_log_write(zfsvfs->z_log, tx, TX_WRITE, zp, off, len, 0);
 	}
 	dmu_tx_commit(tx);

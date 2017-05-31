@@ -45,6 +45,8 @@
 #ifdef __APPLE__
 #include <sys/disk.h>
 #endif
+#include <sys/crypto/icp.h>
+
 /*
  * Emulation of kernel services in userland.
  */
@@ -239,6 +241,11 @@ kstat_create(const char *module, int instance, const char *name,
 {
 	return (NULL);
 }
+
+/*ARGSUSED*/
+void
+kstat_named_init(kstat_named_t *knp, const char *name, uchar_t type)
+{}
 
 /*ARGSUSED*/
 void
@@ -553,31 +560,38 @@ cv_timedwait_hires(kcondvar_t *cv, kmutex_t *mp, hrtime_t tim, hrtime_t res,
     int flag)
 {
 	int error;
-	timestruc_t ts;
+	//timestruc_t tv;
+	struct timeval tv;
+	struct timespec ts;
 	hrtime_t delta;
 
-	ASSERT(flag == 0);
+	ASSERT(flag == 0 || flag == CALLOUT_FLAG_ABSOLUTE);
 
-top:
-	delta = tim - gethrtime();
+	delta = tim;
+	if (flag & CALLOUT_FLAG_ABSOLUTE)
+		delta -= gethrtime();
+
 	if (delta <= 0)
 		return (-1);
 
-	ts.tv_sec = delta / NANOSEC;
-	ts.tv_nsec = delta % NANOSEC;
+	VERIFY(gettimeofday(&tv, NULL) == 0);
+
+	ts.tv_sec = tv.tv_sec + delta / NANOSEC;
+	ts.tv_nsec = tv.tv_usec * NSEC_PER_USEC + (delta % NANOSEC);
+	if (ts.tv_nsec >= NANOSEC) {
+		ts.tv_sec++;
+		ts.tv_nsec -= NANOSEC;
+	}
 
 	ASSERT(mutex_owner(mp) == curthread);
 	mp->m_owner = NULL;
 	error = pthread_cond_timedwait(&cv->cv, &mp->m_lock, &ts);
 	mp->m_owner = curthread;
 
-	if (error == ETIME)
+	if (error == ETIMEDOUT)
 		return (-1);
 
-	if (error == EINTR)
-		goto top;
-
-	ASSERT(error == 0);
+	VERIFY0(error);
 
 	return (1);
 }
@@ -634,18 +648,32 @@ get_disk_size_libzpool(int fd)
 	return (d_size);
 }
 
-/* vdev_file uses vnode_getwithid(), so supply a userspace version. */
+/* vdev_file uses vnode_getwithvid(), so supply a userspace version. */
 int
 vnode_getwithvid(vnode_t *vp, uint32_t id)
 {
 	return (vp->v_id == id) ? 0 : ENOENT;
 }
 
+/* vdev_file uses vnode_getwithref(), so supply a userspace version. */
+int
+vnode_getwithref(vnode_t *vp)
+{
+	return (0);
+}
+
+/* vdev_file ses vnode_rele(), supply a userspace version. */
+void
+vnode_rele(vnode_t *vp)
+{
+	return;
+}
+
 /* vdev_file ses vnode_put(), supply a userspace version. */
 int
 vnode_put(vnode_t *vp)
 {
-	return 0;
+	return (0);
 }
 
 vnode_t *
@@ -1111,7 +1139,68 @@ highbit64(uint64_t i)
 	return (h);
 }
 
+/*
+ * Find lowest one bit set.
+ * Returns bit number + 1 of lowest bit that is set, otherwise returns 0.
+ * This is basically a reimplementation of ffsll(), which is GNU specific.
+ */
+int
+lowbit64(uint64_t i)
+{
+	register int h = 64;
+	if (i == 0)
+		return (0);
+
+	if (i & 0x00000000ffffffffULL)
+		h -= 32;
+	else
+		i >>= 32;
+
+	if (i & 0x0000ffff)
+		h -= 16;
+	else
+		i >>= 16;
+
+	if (i & 0x00ff)
+		h -= 8;
+	else
+		i >>= 8;
+
+	if (i & 0x0f)
+		h -= 4;
+	else
+		i >>= 4;
+
+	if (i & 0x3)
+		h -= 2;
+	else
+		i >>= 2;
+
+	if (i & 0x1)
+		h -= 1;
+
+	return (h);
+}
+
+
 static int random_fd = -1, urandom_fd = -1;
+
+void
+random_init(void)
+{
+	VERIFY((random_fd = open("/dev/random", O_RDONLY)) != -1);
+	VERIFY((urandom_fd = open("/dev/urandom", O_RDONLY)) != -1);
+}
+
+void
+random_fini(void)
+{
+	close(random_fd);
+	close(urandom_fd);
+
+	random_fd = -1;
+	urandom_fd = -1;
+}
 
 static int
 random_get_bytes_common(uint8_t *ptr, size_t len, int fd)
@@ -1229,6 +1318,7 @@ kernel_init(int mode)
 
 	thread_init();
 	system_taskq_init();
+	icp_init();
 
 	spa_init(mode);
 
@@ -1240,14 +1330,11 @@ kernel_fini(void)
 {
 	spa_fini();
 
+	icp_fini();
 	system_taskq_fini();
 	thread_fini();
 
-	close(random_fd);
-	close(urandom_fd);
-
-	random_fd = -1;
-	urandom_fd = -1;
+	random_fini();
 }
 
 uid_t

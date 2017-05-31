@@ -22,6 +22,7 @@ libzpool_la_SOURCES = \
 	../../module/zcommon/zfs_uio.c \
 	../../module/zcommon/zpool_prop.c \
 	../../module/zcommon/zprop_common.c \
+	../../module/zfs/abd.c \
 	../../module/zfs/arc.c \
 	../../module/zfs/blkptr.c \
 	../../module/zfs/bplist.c \
@@ -106,11 +107,13 @@ libzpool_la_SOURCES = \
 	../../module/zfs/zle.c \
 	../../module/zfs/zrlock.c
 
+
 libzpool_la_LIBADD = \
 	$(top_builddir)/lib/libunicode/libunicode.la \
 	$(top_builddir)/lib/libuutil/libuutil.la \
-	$(top_builddir)/lib/libnvpair/libnvpair.la
+	$(top_builddir)/lib/libnvpair/libnvpair.la \
+	$(top_builddir)/lib/libicp/libicp.la
 
-libzpool_la_LDFLAGS = -lz -pthread -version-info 1:1:0
+libzpool_la_LDFLAGS = -lz -version-info 1:1:0
 
 EXTRA_DIST = $(USER_C)

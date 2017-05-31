@@ -21,7 +21,7 @@
 
 /*
  * Copyright (c) 2005, 2010, Oracle and/or its affiliates. All rights reserved.
- * Copyright (c) 2013 by Delphix. All rights reserved.
+ * Copyright (c) 2013, 2015 by Delphix. All rights reserved.
  */
 
 /*
@@ -86,6 +86,7 @@
 #endif /* HAVE_LIBBLKID */
 
 #include "zpool_util.h"
+#include "libdiskmgt.h"
 #include <sys/zfs_context.h>
 
 /*
@@ -339,6 +340,12 @@ check_file(const char *file, boolean_t force, boolean_t isspare)
 	pool_state_t state;
 	boolean_t inuse;
 
+	
+	if (dm_in_swap_dir(file)) {
+		vdev_error(gettext("%s is located within the swapfile directory.\n"), file);
+		return (-1);
+	}
+
 	if ((fd = open(file, O_RDONLY)) < 0)
 		return (0);
 
@@ -398,41 +405,68 @@ check_error(int err)
 	    "failed: %s\n"), strerror(err));
 }
 
+static void
+libdiskmgt_error(int error)
+{
+	/*
+	 * ENXIO/ENODEV is a valid error message if the device doesn't live in
+	 * /dev/dsk.  Don't bother printing an error message in this case.
+	 */
+	if (error == ENXIO || error == ENODEV)
+		return;
+
+	(void) fprintf(stderr, gettext("warning: device in use checking "
+	    "failed: %s\n"), strerror(error));
+}
+
 static int
 check_slice(const char *path, blkid_cache cache, int force, boolean_t isspare)
 {
-	int err;
-#ifdef HAVE_LIBBLKID
-	char *value;
+  char *msg;
+  int error = 0;
+  dm_who_type_t who;
+  
+  if (force)
+    who = DM_WHO_ZPOOL_FORCE;
+  else if (isspare)
+    who = DM_WHO_ZPOOL_SPARE;
+  else
+    who = DM_WHO_ZPOOL;
 
-	/* No valid type detected device is safe to use */
-	value = blkid_get_tag_value(cache, "TYPE", path);
-	if (value == NULL)
-		return (0);
+  if (dm_inuse((char *)path, &msg, who, &error) || error) {
+    if (error != 0) {
+      libdiskmgt_error(error);
+      return (0);
+    } else {
+      vdev_error("%s", msg);
+      free(msg);
+      return (-1);
+    }
+  }
 
-	/*
-	 * If libblkid detects a ZFS device, we check the device
-	 * using check_file() to see if it's safe.  The one safe
-	 * case is a spare device shared between multiple pools.
-	 */
-	if (strcmp(value, "zfs_member") == 0) {
-		err = check_file(path, force, isspare);
-	} else {
-		if (force) {
-			err = 0;
-		} else {
-			err = -1;
-			vdev_error(gettext("%s contains a filesystem of "
-			    "type '%s'\n"), path, value);
-		}
-	}
+#if 0
+  /*
+   * If we're given a whole disk, ignore overlapping slices since we're
+   * about to label it anyway.
+   */
+  error = 0;
+  if (!wholedisk && !force &&
+      (dm_isoverlapping((char *)path, &msg, &error) || error)) {
+    if (error == 0) {
+      /* dm_isoverlapping returned -1 */
+      vdev_error(gettext("%s overlaps with %s\n"), path, msg);
+      free(msg);
+      return (-1);
+    } else if (error != ENODEV) {
+      /* libdiskmgt's devcache only handles physical drives */
+      libdiskmgt_error(error);
+      return (0);
+    }
+  }
 
-	free(value);
-#else
-	err = check_file(path, force, isspare);
-#endif /* HAVE_LIBBLKID */
-
-	return (err);
+#endif
+	
+  return (0);
 }
 
 /*
@@ -454,6 +488,7 @@ check_disk(const char *path, blkid_cache cache, int force,
 	struct dk_gpt *vtoc;
 	char slice_path[MAXPATHLEN];
 	int err = 0;
+	int slice_err = 0;
 	int fd, i;
 
 	if (!iswholedisk)
@@ -512,9 +547,11 @@ check_disk(const char *path, blkid_cache cache, int force,
 		    "%ss%d", path, i+1);
 #endif
 
-		err = check_slice(slice_path, cache, force, isspare);
-		if (err)
-			break;
+		slice_err = check_slice(slice_path, cache, force, isspare);
+		
+		// Latch the first error that occurs
+		if (err == 0)
+			err = slice_err;
 	}
 
 	efi_free(vtoc);
@@ -719,7 +756,7 @@ make_leaf_vdev(nvlist_t *props, const char *arg, uint64_t is_log)
 			if (err == ENOENT) {
 				(void) fprintf(stderr,
 				    gettext("cannot open '%s': no such "
-				    "device in %s\n"), arg, DISK_ROOT);
+				    "device in %s\n"), arg, ZFS_DISK_ROOT);
 				(void) fprintf(stderr,
 				    gettext("must be a full path or "
 				    "shorthand device name\n"));
@@ -830,7 +867,6 @@ get_replication(nvlist_t *nvroot, boolean_t fatal)
 	verify(nvlist_lookup_nvlist_array(nvroot, ZPOOL_CONFIG_CHILDREN,
 	    &top, &toplevels) == 0);
 
-	lastrep.zprl_type = NULL;
 	for (t = 0; t < toplevels; t++) {
 		uint64_t is_log = B_FALSE;
 
@@ -980,7 +1016,8 @@ get_replication(nvlist_t *nvroot, boolean_t fatal)
 				 */
 				if (!dontreport &&
 				    (vdev_size != -1ULL &&
-				    (labs(size - vdev_size) >
+				    ((size > vdev_size ? (size - vdev_size) :
+				    (vdev_size - size)) >
 				    ZPOOL_FUZZ))) {
 					if (ret != NULL)
 						free(ret);
@@ -1222,7 +1259,10 @@ make_disks(zpool_handle_t *zhp, nvlist_t *nv)
 		    &wholedisk));
 
 		if (!wholedisk) {
+#ifdef __LINUX__
+/* XXX We don't need to jump through blkid hoops here. */
 			(void) zero_label(path);
+#endif
 			return (0);
 		}
 

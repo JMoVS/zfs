@@ -1,6 +1,26 @@
 /*
- * This file is intended only for use by zfs_vnops_osx.c.  It should contain
- * a library of functions useful for vnode operations.
+ * CDDL HEADER START
+ *
+ * The contents of this file are subject to the terms of the
+ * Common Development and Distribution License (the "License").
+ * You may not use this file except in compliance with the License.
+ *
+ * You can obtain a copy of the license at usr/src/OPENSOLARIS.LICENSE
+ * or http://www.opensolaris.org/os/licensing.
+ * See the License for the specific language governing permissions
+ * and limitations under the License.
+ *
+ * When distributing Covered Code, include this CDDL HEADER in each
+ * file and include the License file at usr/src/OPENSOLARIS.LICENSE.
+ * If applicable, add the following below this CDDL HEADER, with the
+ * fields enclosed by brackets "[]" replaced with your own identifying
+ * information: Portions Copyright [yyyy] [name of copyright owner]
+ *
+ * CDDL HEADER END
+ */
+/*
+ * Copyright (c) 2013 Will Andrews <will@firepipe.net>
+ * Copyright (c) 2013, 2016 Jorgen Lundman <lundman@lundman.net>
  */
 #include <sys/cred.h>
 #include <sys/vnode.h>
@@ -19,10 +39,25 @@
 
 #include <sys/unistd.h>
 #include <sys/xattr.h>
+#include <sys/uuid.h>
 #include <sys/utfconv.h>
 #include <sys/finderinfo.h>
+#include <libkern/crypto/md5.h>
 
 extern int zfs_vnop_force_formd_normalized_output; /* disabled by default */
+
+/*
+ * Unfortunately Apple defines "KAUTH_VNODE_ACCESS (1<<31)" which
+ * generates: "warning: signed shift result (0x80000000) sets the
+ * sign bit of the shift expression's type ('int') and becomes negative."
+ * So until they fix their define, we override it here.
+ */
+
+#if KAUTH_VNODE_ACCESS == 0x80000000
+#undef KAUTH_VNODE_ACCESS
+#define KAUTH_VNODE_ACCESS (1ULL<<31)
+#endif
+
 
 
 int zfs_hardlink_addmap(znode_t *zp, uint64_t parentid, uint32_t linkid);
@@ -221,7 +256,7 @@ zfs_getattr_znode_unlocked(struct vnode *vp, vattr_t *vap)
 	 */
 	error = sa_bulk_lookup(zp->z_sa_hdl, bulk, count);
 	if (error) {
-		printf("ZFS: Warning: getattr failed sa_bulk_lookup: %d, parent %llu, flags %llu\n",
+		dprintf("ZFS: Warning: getattr failed sa_bulk_lookup: %d, parent %llu, flags %llu\n",
 			   error, parent, zp->z_pflags );
 		mutex_exit(&zp->z_lock);
 		ZFS_EXIT(zfsvfs);
@@ -241,7 +276,11 @@ zfs_getattr_znode_unlocked(struct vnode *vp, vattr_t *vap)
 
 	vap->va_data_size = zp->z_size;
 	vap->va_total_size = zp->z_size;
-	vap->va_gen = zp->z_gen;
+	//vap->va_gen = zp->z_gen;
+	vap->va_gen = 0;
+#if defined(DEBUG) || defined(ZFS_DEBUG)
+if (zp->z_gen != 0) dprintf("%s: va_gen %lld -> 0\n", __func__, zp->z_gen);
+#endif
 
 	if (vnode_isdir(vp)) {
 		vap->va_nlink = zp->z_size;
@@ -397,7 +436,7 @@ zfs_getattr_znode_unlocked(struct vnode *vp, vattr_t *vap)
 			rw_exit(&zfsvfs->z_hardlinks_lock);
 
 			if (!findnode) {
-				static uint32_t zfs_hardlink_sequence = 1<<31;
+				static uint32_t zfs_hardlink_sequence = 1ULL<<31;
 				uint32_t id;
 
 				id = atomic_inc_32_nv(&zfs_hardlink_sequence);
@@ -421,7 +460,8 @@ zfs_getattr_znode_unlocked(struct vnode *vp, vattr_t *vap)
         VATTR_RETURN(vap, va_filerev, 0);
     }
 	if (VATTR_IS_ACTIVE(vap, va_fsid)) {
-        VATTR_RETURN(vap, va_fsid, vfs_statfs(zfsvfs->z_vfs)->f_fsid.val[0]);
+        //VATTR_RETURN(vap, va_fsid, vfs_statfs(zfsvfs->z_vfs)->f_fsid.val[0]);
+        VATTR_RETURN(vap, va_fsid, zfsvfs->z_rdev);
     }
 	if (VATTR_IS_ACTIVE(vap, va_type)) {
         VATTR_RETURN(vap, va_type, vnode_vtype(ZTOV(zp)));
@@ -794,7 +834,62 @@ ace_trivial_common(void *acep, int aclcnt,
                    uint64_t (*walk)(void *, uint64_t, int aclcnt,
                                     uint16_t *, uint16_t *, uint32_t *))
 {
-    return 1;
+	uint16_t flags;
+	uint32_t mask;
+	uint16_t type;
+	uint64_t cookie = 0;
+
+	while ((cookie = walk(acep, cookie, aclcnt, &flags, &type, &mask))) {
+		switch (flags & ACE_TYPE_FLAGS) {
+			case ACE_OWNER:
+			case ACE_GROUP|ACE_IDENTIFIER_GROUP:
+			case ACE_EVERYONE:
+				break;
+			default:
+				return (1);
+
+		}
+
+		if (flags & (ACE_FILE_INHERIT_ACE|
+					 ACE_DIRECTORY_INHERIT_ACE|ACE_NO_PROPAGATE_INHERIT_ACE|
+					 ACE_INHERIT_ONLY_ACE))
+			return (1);
+
+		/*
+		 * Special check for some special bits
+		 *
+		 * Don't allow anybody to deny reading basic
+		 * attributes or a files ACL.
+		 */
+		if ((mask & (ACE_READ_ACL|ACE_READ_ATTRIBUTES)) &&
+			(type == ACE_ACCESS_DENIED_ACE_TYPE))
+			return (1);
+
+		/*
+		 * Delete permission is never set by default
+		 */
+		if (mask & ACE_DELETE)
+			return (1);
+
+		/*
+		 * Child delete permission should be accompanied by write
+                 */
+		if ((mask & ACE_DELETE_CHILD) && !(mask & ACE_WRITE_DATA))
+			return (1);
+		/*
+		 * only allow owner@ to have
+		 * write_acl/write_owner/write_attributes/write_xattr/
+		 */
+
+		if (type == ACE_ACCESS_ALLOWED_ACE_TYPE &&
+			(!(flags & ACE_OWNER) && (mask &
+			(ACE_WRITE_OWNER|ACE_WRITE_ACL| ACE_WRITE_ATTRIBUTES|
+			ACE_WRITE_NAMED_ATTRS))))
+			return (1);
+
+	}
+
+	return (0);
 }
 
 
@@ -805,7 +900,8 @@ acl_trivial_access_masks(mode_t mode, boolean_t isdir, trivial_acl_t *masks)
     uint32_t write_mask = ACE_WRITE_DATA|ACE_APPEND_DATA;
     uint32_t execute_mask = ACE_EXECUTE;
 
-    (void) isdir;   /* will need this later */
+	if (isdir)
+		write_mask |= ACE_DELETE_CHILD;
 
     masks->deny1 = 0;
     if (!(mode & S_IRUSR) && (mode & (S_IRGRP|S_IROTH)))
@@ -1838,7 +1934,9 @@ zpl_xattr_get_sa(struct vnode *vp, const char *name, void *value, size_t size)
 	uint_t nv_size;
 	int error = 0;
 
+#ifdef __LINUX__
 	ASSERT(RW_LOCK_HELD(&zp->z_xattr_lock));
+#endif
 
 	mutex_enter(&zp->z_lock);
 	if (zp->z_xattr_cached == NULL)
@@ -1951,7 +2049,7 @@ int zfs_setattr_set_documentid(znode_t *zp, boolean_t update_flags)
 	int             count = 0;
 	sa_bulk_attr_t  bulk[2];
 
-	printf("ZFS: vnop_setattr(UF_TRACKED) obj %llu : documentid %08u\n",
+	dprintf("ZFS: vnop_setattr(UF_TRACKED) obj %llu : documentid %08u\n",
 		   zp->z_id,
 		   zp->z_document_id);
 
@@ -1981,7 +2079,7 @@ int zfs_setattr_set_documentid(znode_t *zp, boolean_t update_flags)
 		}
 
 		if (error)
-			printf("ZFS: sa_update(SA_ZPL_DOCUMENTID) failed %d\n",
+			dprintf("ZFS: sa_update(SA_ZPL_DOCUMENTID) failed %d\n",
 				   error);
 
 	} // if z_use_sa && !readonly
@@ -2025,3 +2123,72 @@ int zfs_hardlink_addmap(znode_t *zp, uint64_t parentid, uint32_t linkid)
 
 	return findnode ? 1 : 0;
 } // findnode
+
+/* dst buffer must be at least UUID_PRINTABLE_STRING_LENGTH bytes */
+int
+zfs_vfs_uuid_unparse(uuid_t uuid, char *dst)
+{
+	if (!uuid || !dst) {
+		dprintf("%s missing argument\n", __func__);
+		return (EINVAL);
+	}
+
+	snprintf(dst, UUID_PRINTABLE_STRING_LENGTH, "%02X%02X%02X%02X-"
+	    "%02X%02X-%02X%02X-%02X%02X-%02X%02X%02X%02X%02X%02X",
+	    uuid[0], uuid[1], uuid[2], uuid[3],
+	    uuid[4], uuid[5], uuid[6], uuid[7],
+	    uuid[8], uuid[9], uuid[10], uuid[11],
+	    uuid[12], uuid[13], uuid[14], uuid[15]);
+
+	return (0);
+}
+
+int
+zfs_vfs_uuid_gen(const char *osname, uuid_t uuid)
+{
+	MD5_CTX  md5c;
+	/* namespace (generated by uuidgen) */
+	/* 50670853-FBD2-4EC3-9802-73D847BF7E62 */
+	char namespace[16] = {0x50, 0x67, 0x08, 0x53, /* - */
+	    0xfb, 0xd2, /* - */ 0x4e, 0xc3, /* - */
+	    0x98, 0x02, /* - */
+	    0x73, 0xd8, 0x47, 0xbf, 0x7e, 0x62};
+
+	/* Validate arguments */
+	if (!osname || !uuid || strlen(osname) == 0) {
+		dprintf("%s missing argument\n", __func__);
+		return (EINVAL);
+	}
+
+	/*
+	 * UUID version 3 (MD5) namespace variant:
+	 * hash namespace (uuid) together with name
+	 */
+	MD5Init( &md5c );
+	MD5Update( &md5c, &namespace, sizeof (namespace));
+	MD5Update( &md5c, osname, strlen(osname));
+	MD5Final( uuid, &md5c );
+
+	/*
+	 * To make UUID version 3, twiddle a few bits:
+	 * xxxxxxxx-xxxx-Mxxx-Nxxx-xxxxxxxxxxxx
+	 * [uint32]-[uin-t32]-[uin-t32][uint32]
+	 * M should be 0x3 to indicate uuid v3
+	 * N should be 0x8, 0x9, 0xa, or 0xb
+	 */
+	uuid[6] = (uuid[6] & 0x0F) | 0x30;
+	uuid[8] = (uuid[8] & 0x3F) | 0x80;
+
+	/* Print all caps */
+	//dprintf("%s UUIDgen: [%s](%ld)->"
+	dprintf("%s UUIDgen: [%s](%ld) -> "
+	    "[%02X%02X%02X%02X-%02X%02X-%02X%02X-"
+	    "%02X%02X-%02X%02X%02X%02X%02X%02X]\n",
+	    __func__, osname, strlen(osname),
+	    uuid[0], uuid[1], uuid[2], uuid[3],
+	    uuid[4], uuid[5], uuid[6], uuid[7],
+	    uuid[8], uuid[9], uuid[10], uuid[11],
+	    uuid[12], uuid[13], uuid[14], uuid[15]);
+
+	return (0);
+}

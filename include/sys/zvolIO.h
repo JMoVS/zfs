@@ -1,8 +1,49 @@
+/*
+ * CDDL HEADER START
+ *
+ * The contents of this file are subject to the terms of the
+ * Common Development and Distribution License (the "License").
+ * You may not use this file except in compliance with the License.
+ *
+ * You can obtain a copy of the license at usr/src/OPENSOLARIS.LICENSE
+ * or http://www.opensolaris.org/os/licensing.
+ * See the License for the specific language governing permissions
+ * and limitations under the License.
+ *
+ * When distributing Covered Code, include this CDDL HEADER in each
+ * file and include the License file at usr/src/OPENSOLARIS.LICENSE.
+ * If applicable, add the following below this CDDL HEADER, with the
+ * fields enclosed by brackets "[]" replaced with your own identifying
+ * information: Portions Copyright [yyyy] [name of copyright owner]
+ *
+ * CDDL HEADER END
+ */
+/*
+ * Copyright (c) 2013, 2016 Jorgen Lundman <lundman@lundman.net>
+ */
+
 #ifndef	ZVOLIO_H_INCLUDED
 #define	ZVOLIO_H_INCLUDED
 
+#ifdef __cplusplus
 #include <IOKit/IOService.h>
+
+extern "C" {
+#endif /* __cplusplus */
+
 #include <sys/zvol.h>
+
+struct iomem {
+	IOMemoryDescriptor *buf;
+};
+
+uint64_t zvolIO_kit_read(struct iomem *iomem, uint64_t offset,
+    char *address, uint64_t len);
+uint64_t zvolIO_kit_write(struct iomem *iomem, uint64_t offset,
+    char *address, uint64_t len);
+
+#ifdef __cplusplus
+} /* extern "C" */
 
 class net_lundman_zfs_zvol : public IOService
 {
@@ -16,10 +57,7 @@ public:
 	virtual IOService* probe(IOService* provider, SInt32* score);
 	virtual bool start(IOService* provider);
 	virtual void stop(IOService* provider);
-	virtual IOReturn doEjectMedia(void *nub);
-	virtual bool createBlockStorageDevice(zvol_state_t *zv);
-	virtual bool destroyBlockStorageDevice(zvol_state_t *zv);
-	virtual bool updateVolSize(zvol_state_t *zv);
+	virtual bool isOpen(const IOService *forClient = 0) const;
 };
 
 #include <IOKit/storage/IOBlockStorageDevice.h>
@@ -29,7 +67,7 @@ class net_lundman_zfs_zvol_device : public IOBlockStorageDevice
 	OSDeclareDefaultStructors(net_lundman_zfs_zvol_device)
 
 private:
-	net_lundman_zfs_zvol *m_provider;
+	IOService *m_provider;
 	zvol_state_t *zv;
 
 public:
@@ -78,7 +116,12 @@ public:
 	virtual void handleClose(IOService *client,
 	    IOOptionBits options);
 
-	virtual int getBSDName();
+	virtual int getBSDName(void);
+	virtual int renameDevice(void);
+	virtual int offlineDevice(void);
+	virtual int onlineDevice(void);
+	virtual int refreshDevice(void);
 };
+#endif /* __cplusplus */
 
-#endif
+#endif /* ZVOLIO_H_INCLUDED */

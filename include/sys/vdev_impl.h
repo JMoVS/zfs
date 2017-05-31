@@ -35,6 +35,10 @@
 #include <sys/dkio.h>
 #include <sys/uberblock_impl.h>
 
+#ifdef __APPLE__
+#include <sys/ldi_buf.h>
+#endif
+
 #ifdef	__cplusplus
 extern "C" {
 #endif
@@ -52,6 +56,10 @@ extern "C" {
 typedef struct vdev_queue vdev_queue_t;
 typedef struct vdev_cache vdev_cache_t;
 typedef struct vdev_cache_entry vdev_cache_entry_t;
+struct abd;
+
+extern uint64_t zfs_vdev_queue_depth_pct;
+extern uint32_t zfs_vdev_async_write_max_active;
 
 /*
  * Virtual device operations
@@ -83,7 +91,7 @@ typedef const struct vdev_ops {
  * Virtual device properties
  */
 struct vdev_cache_entry {
-	char		*ve_data;
+	struct abd	*ve_abd;
 	uint64_t	ve_offset;
 	clock_t		ve_lastused;
 	avl_node_t	ve_offset_node;
@@ -150,6 +158,7 @@ struct vdev {
 	vdev_t		**vdev_child;	/* array of children		*/
 	uint64_t	vdev_children;	/* number of children		*/
 	vdev_stat_t	vdev_stat;	/* virtual device statistics	*/
+	vdev_stat_ex_t	vdev_stat_ex;	/* extended statistics		*/
 	boolean_t	vdev_expanding;	/* expand the vdev?		*/
 	boolean_t	vdev_reopening;	/* reopen in progress?		*/
 	boolean_t	vdev_nonrot;	/* true if solid state		*/
@@ -176,7 +185,19 @@ struct vdev {
 	uint64_t	vdev_deflate_ratio; /* deflation ratio (x512)	*/
 	uint64_t	vdev_islog;	/* is an intent log device	*/
 	uint64_t	vdev_removing;	/* device is being removed?	*/
-	boolean_t	vdev_ishole;	/* is a hole in the namespace 	*/
+	boolean_t	vdev_ishole;	/* is a hole in the namespace	*/
+	kmutex_t	vdev_queue_lock; /* protects vdev_queue_depth	*/
+	uint64_t	vdev_top_zap;
+
+	/*
+	 * The queue depth parameters determine how many async writes are
+	 * still pending (i.e. allocated by net yet issued to disk) per
+	 * top-level (vdev_async_write_queue_depth) and the maximum allowed
+	 * (vdev_max_async_write_queue_depth). These values only apply to
+	 * top-level vdevs.
+	 */
+	uint64_t	vdev_async_write_queue_depth;
+	uint64_t	vdev_max_async_write_queue_depth;
 
 	/*
 	 * Leaf vdev state.
@@ -215,6 +236,7 @@ struct vdev {
 	spa_aux_vdev_t	*vdev_aux;	/* for l2cache and spares vdevs	*/
 	zio_t		*vdev_probe_zio; /* root of current probe	*/
 	vdev_aux_t	vdev_label_aux;	/* on-disk aux state		*/
+	uint64_t	vdev_leaf_zap;
 
 	/*
 	 * For DTrace to work in userland (libzpool) context, these fields must

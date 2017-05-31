@@ -291,6 +291,7 @@ typedef struct kcondvar {
 } kcondvar_t;
 
 #define	CV_DEFAULT	0
+#define CALLOUT_FLAG_ABSOLUTE   0x2
 
 extern void cv_init(kcondvar_t *cv, char *name, int type, void *arg);
 extern void cv_destroy(kcondvar_t *cv);
@@ -309,6 +310,7 @@ extern void cv_broadcast(kcondvar_t *cv);
  */
 extern kstat_t *kstat_create(const char *, int,
     const char *, const char *, uchar_t, ulong_t, uchar_t);
+extern void kstat_named_init(kstat_named_t *, const char *, uchar_t);
 extern void kstat_install(kstat_t *);
 extern void kstat_delete(kstat_t *);
 extern void kstat_waitq_enter(kstat_io_t *);
@@ -332,6 +334,7 @@ extern void kstat_set_raw_ops(kstat_t *ksp,
 #define	KMC_NODEBUG		UMC_NODEBUG
 #define	KMC_KMEM		0x0
 #define	KMC_VMEM		0x0
+#define KMC_NOTOUCH     0x00010000
 #define	kmem_alloc(_s, _f)	umem_alloc(_s, _f)
 #define	kmem_zalloc(_s, _f)	umem_zalloc(_s, _f)
 #define	kmem_free(_b, _s)	umem_free(_b, _s)
@@ -362,8 +365,8 @@ typedef enum kmem_cbrc {
 /*
  * Task queues
  */
-typedef struct taskq taskq_t;
-typedef uintptr_t taskqid_t;
+#define TASKQ_NAMELEN   31
+
 typedef void (task_func_t)(void *);
 
 typedef struct taskq_ent {
@@ -373,6 +376,27 @@ typedef struct taskq_ent {
 	void			*tqent_arg;
 	uintptr_t		tqent_flags;
 } taskq_ent_t;
+
+typedef struct taskq {
+	char            tq_name[TASKQ_NAMELEN + 1];
+	kmutex_t        tq_lock;
+	krwlock_t       tq_threadlock;
+	kcondvar_t      tq_dispatch_cv;
+	kcondvar_t      tq_wait_cv;
+	kthread_t       **tq_threadlist;
+	int             tq_flags;
+	int             tq_active;
+	int             tq_nthreads;
+	int             tq_nalloc;
+	int             tq_minalloc;
+	int             tq_maxalloc;
+	kcondvar_t      tq_maxalloc_cv;
+	int             tq_maxalloc_wait;
+	taskq_ent_t     *tq_freelist;
+	taskq_ent_t     tq_task;
+} taskq_t;
+typedef uintptr_t taskqid_t;
+
 
 #define	TQENT_FLAG_PREALLOC	0x1	/* taskq_dispatch_ent used */
 
@@ -430,7 +454,9 @@ struct vnode {
 #define vnode_vid(vp) ((vp)->v_id)
 #define pwrite64 pwrite
 int vnode_getwithvid(vnode_t *vp, uint32_t id);
+int vnode_getwithref(vnode_t *vp);
 int vnode_put(vnode_t *vp);
+void vnode_rele(vnode_t *vp);
 #endif
 
 #undef vnode_t
@@ -583,7 +609,10 @@ extern void delay(clock_t ticks);
 
 extern uint64_t physmem;
 
-extern int highbit(ulong_t i);
+//extern int highbit(ulong_t i);
+#define highbit highbit64
+extern int lowbit64(uint64_t i);
+
 extern int random_get_bytes(uint8_t *ptr, size_t len);
 extern int random_get_pseudo_bytes(uint8_t *ptr, size_t len);
 
@@ -591,10 +620,13 @@ extern void kernel_init(int);
 extern void kernel_fini(void);
 extern void thread_init(void);
 extern void thread_fini(void);
+extern void random_init(void);
+extern void random_fini(void);
 
 struct spa;
 extern void nicenum(uint64_t num, char *buf);
 extern void show_pool_stats(struct spa *);
+extern int set_global_var(char *arg);
 
 typedef struct callb_cpr {
 	kmutex_t	*cc_lockp;
@@ -701,8 +733,18 @@ struct uio *uio_create(
                        int a_iodirection );        /* read or write flag */
 user_addr_t uio_curriovbase( struct uio *a_uio );
 int uio_iovcnt( struct uio *a_uio );
-
-
+void uio_free( struct uio *a_uio );
+int uio_addiov(struct uio *o,user_addr_t a_baseaddr,user_size_t a_length );
+int uio_getiov( struct uio *a_uio,
+                 int a_index,
+                 user_addr_t * a_baseaddr_p,
+                 user_size_t * a_length_p );
+user_size_t uio_curriovlen( struct uio *a_uio );
+int uio_isuserspace( struct uio *a_uio );
+user_ssize_t uio_resid( struct uio *a_uio );
+void uio_setrw( struct uio *a_uio, int a_value );
+int uiomove(const char * cp, int n, int r, struct uio *uio);
+void uio_update( struct uio *a_uio, user_size_t a_count );
 
 #define SEC_TO_TICK(sec)        ((sec) * hz)
 #define MSEC_TO_TICK(msec)      ((msec) / (MILLISEC / hz))
@@ -719,6 +761,9 @@ int uio_iovcnt( struct uio *a_uio );
 
 #define kpreempt(X)
 
+
+#include <libkern/OSByteOrder.h>
+#define htobe32(x) OSSwapHostToBigInt32(x)
 
 
 #endif /* !_KERNEL */

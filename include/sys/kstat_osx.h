@@ -1,3 +1,27 @@
+/*
+ * CDDL HEADER START
+ *
+ * The contents of this file are subject to the terms of the
+ * Common Development and Distribution License (the "License").
+ * You may not use this file except in compliance with the License.
+ *
+ * You can obtain a copy of the license at usr/src/OPENSOLARIS.LICENSE
+ * or http://www.opensolaris.org/os/licensing.
+ * See the License for the specific language governing permissions
+ * and limitations under the License.
+ *
+ * When distributing Covered Code, include this CDDL HEADER in each
+ * file and include the License file at usr/src/OPENSOLARIS.LICENSE.
+ * If applicable, add the following below this CDDL HEADER, with the
+ * fields enclosed by brackets "[]" replaced with your own identifying
+ * information: Portions Copyright [yyyy] [name of copyright owner]
+ *
+ * CDDL HEADER END
+ */
+/*
+ * Copyright (c) 2014, 2016 Jorgen Lundman <lundman@lundman.net>
+ */
+
 #ifndef KSTAT_OSX_INCLUDED
 #define KSTAT_OSX_INCLUDED
 
@@ -7,6 +31,7 @@ typedef struct osx_kstat {
 
 	kstat_named_t darwin_active_vnodes;
 	kstat_named_t darwin_debug;
+        kstat_named_t darwin_reclaim_nodes;
 	kstat_named_t darwin_ignore_negatives;
 	kstat_named_t darwin_ignore_positives;
 	kstat_named_t darwin_create_negatives;
@@ -20,7 +45,6 @@ typedef struct osx_kstat {
 	kstat_named_t arc_zfs_arc_grow_retry;
 	kstat_named_t arc_zfs_arc_shrink_shift;
 	kstat_named_t arc_zfs_arc_p_min_shift;
-	kstat_named_t arc_zfs_disable_dup_eviction;
 	kstat_named_t arc_zfs_arc_average_blocksize;
 
 	kstat_named_t l2arc_write_max;
@@ -111,6 +135,15 @@ typedef struct osx_kstat {
 	kstat_named_t zfs_vdev_mirror_non_rotating_seek_inc;
 
 	kstat_named_t zvol_inhibit_dev;
+	kstat_named_t zfs_send_set_freerecords_bit;
+
+	kstat_named_t zfs_write_implies_delete_child;
+	kstat_named_t zfs_send_holes_without_birth_time;
+
+	kstat_named_t dbuf_cache_max_bytes;
+
+	kstat_named_t zfs_vdev_queue_depth_pct;
+	kstat_named_t zio_dva_throttle_enabled;
 } osx_kstat_t;
 
 
@@ -120,6 +153,7 @@ extern unsigned int zfs_vnop_ignore_positives;
 extern unsigned int zfs_vnop_create_negatives;
 extern unsigned int zfs_vnop_skip_unlinked_drain;
 extern uint64_t vnop_num_vnodes;
+extern uint64_t vnop_num_reclaims;
 
 extern uint64_t zfs_arc_max;
 extern uint64_t zfs_arc_min;
@@ -128,7 +162,6 @@ extern uint64_t zfs_arc_meta_min;
 extern int zfs_arc_grow_retry;
 extern int zfs_arc_shrink_shift;
 extern int zfs_arc_p_min_shift;
-extern int zfs_disable_dup_eviction;
 extern int zfs_arc_average_blocksize;
 
 extern uint64_t l2arc_write_max;
@@ -198,6 +231,16 @@ extern uint64_t zfs_vdev_mirror_rotating_seek_offset;
 extern uint64_t zfs_vdev_mirror_non_rotating_inc;
 extern uint64_t zfs_vdev_mirror_non_rotating_seek_inc;
 extern uint64_t zvol_inhibit_dev;
+extern uint64_t zfs_send_set_freerecords_bit;
+
+extern uint64_t zfs_write_implies_delete_child;
+extern uint64_t send_holes_without_birth_time;
+extern uint64_t zfs_send_holes_without_birth_time;
+
+extern uint64_t dbuf_cache_max_bytes;
+
+extern uint64_t zfs_vdev_queue_depth_pct;
+extern boolean_t zio_dva_throttle_enabled;
 
 int        kstat_osx_init(void);
 void       kstat_osx_fini(void);
